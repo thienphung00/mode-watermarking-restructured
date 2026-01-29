@@ -242,18 +242,36 @@ class GPUPipeline:
         import torch
         
         # Import watermarking components from src
+        from src.core.config import SeedBiasConfig
         from src.engine.strategies.seed_bias import SeedBiasStrategy
         
-        # Create watermark strategy
-        strategy = SeedBiasStrategy(
-            master_key=derived_key,  # Using derived key
-            key_id=key_id,
+	
+        seed_bias_config = SeedBiasConfig(
             lambda_strength=embedding_config.get("lambda_strength", 0.05),
             domain=embedding_config.get("domain", "frequency"),
             low_freq_cutoff=embedding_config.get("low_freq_cutoff", 0.05),
             high_freq_cutoff=embedding_config.get("high_freq_cutoff", 0.4),
         )
         
+	# Compute latent shape from image dimensions
+        latent_shape = (4, height // 8, width // 8)
+        
+        # Create watermark strategy with new constructor API
+        strategy = SeedBiasStrategy(
+            config=seed_bias_config,
+            master_key=derived_key,
+            latent_shape=latent_shape,
+            device=self.device,
+        )
+        
+        # Pass key_id via prepare_for_sample (not constructor)
+        strategy.prepare_for_sample(
+            sample_id=f"gen-{seed}",
+            prompt=prompt,
+            seed=seed,
+            key_id=key_id,
+        )
+
         # Set seed
         generator = torch.Generator(device=self.device).manual_seed(seed)
         
