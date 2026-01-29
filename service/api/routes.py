@@ -271,6 +271,7 @@ async def detect_watermark(
         response = await gpu_client.detect(
             key_id=key_id,
             derived_key=payload["derived_key"],
+            master_key=payload["master_key"],
             key_fingerprint=payload["key_fingerprint"],
             image_base64=image_b64,
             request_id=request_id,

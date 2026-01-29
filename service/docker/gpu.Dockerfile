@@ -22,6 +22,8 @@ RUN apt-get update && apt-get install -y \
     python3-pip \
     git \
     curl \
+    build-essential \
+    libffi-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Make python3 point to python3.11
@@ -31,6 +33,9 @@ RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1
 WORKDIR /app
 
 # Install Python dependencies
+# Install cffi first (required by cryptography, huggingface stack, etc.)
+RUN pip3 install --no-cache-dir cffi
+
 # Install PyTorch with CUDA support
 RUN pip3 install --no-cache-dir \
     torch>=2.0.0 \
