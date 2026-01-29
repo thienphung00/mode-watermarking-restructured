@@ -1,0 +1,439 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Watermark API Demo</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            min-height: 100vh;
+            color: #e0e0e0;
+            padding: 2rem;
+        }
+        
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        
+        h1 {
+            text-align: center;
+            margin-bottom: 2rem;
+            color: #00d4ff;
+            font-size: 2.5rem;
+        }
+        
+        .card {
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 12px;
+            padding: 1.5rem;
+            margin-bottom: 1.5rem;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+        
+        .card h2 {
+            color: #00d4ff;
+            margin-bottom: 1rem;
+            font-size: 1.25rem;
+        }
+        
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
+            gap: 1.5rem;
+        }
+        
+        .form-group {
+            margin-bottom: 1rem;
+        }
+        
+        label {
+            display: block;
+            margin-bottom: 0.5rem;
+            color: #a0a0a0;
+            font-size: 0.875rem;
+        }
+        
+        input, textarea, select {
+            width: 100%;
+            padding: 0.75rem;
+            border-radius: 8px;
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            background: rgba(0, 0, 0, 0.3);
+            color: #e0e0e0;
+            font-size: 1rem;
+        }
+        
+        input:focus, textarea:focus, select:focus {
+            outline: none;
+            border-color: #00d4ff;
+        }
+        
+        button {
+            background: linear-gradient(135deg, #00d4ff 0%, #0099cc 100%);
+            color: #1a1a2e;
+            border: none;
+            padding: 0.75rem 1.5rem;
+            border-radius: 8px;
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+        
+        button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 20px rgba(0, 212, 255, 0.3);
+        }
+        
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none;
+        }
+        
+        .result {
+            margin-top: 1rem;
+            padding: 1rem;
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 8px;
+            font-family: monospace;
+            white-space: pre-wrap;
+            word-break: break-all;
+        }
+        
+        .result.success {
+            border-left: 4px solid #00ff88;
+        }
+        
+        .result.error {
+            border-left: 4px solid #ff4444;
+        }
+        
+        .key-display {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+            background: rgba(0, 212, 255, 0.1);
+            padding: 0.75rem 1rem;
+            border-radius: 8px;
+            margin-bottom: 1rem;
+        }
+        
+        .key-display code {
+            flex: 1;
+            font-family: monospace;
+            color: #00d4ff;
+        }
+        
+        .status-badge {
+            display: inline-block;
+            padding: 0.25rem 0.75rem;
+            border-radius: 20px;
+            font-size: 0.75rem;
+            font-weight: 600;
+        }
+        
+        .status-badge.connected {
+            background: rgba(0, 255, 136, 0.2);
+            color: #00ff88;
+        }
+        
+        .status-badge.disconnected {
+            background: rgba(255, 68, 68, 0.2);
+            color: #ff4444;
+        }
+        
+        .detection-result {
+            text-align: center;
+            padding: 2rem;
+        }
+        
+        .detection-result.detected {
+            color: #00ff88;
+        }
+        
+        .detection-result.not-detected {
+            color: #ff4444;
+        }
+        
+        .confidence-bar {
+            height: 8px;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 4px;
+            overflow: hidden;
+            margin-top: 0.5rem;
+        }
+        
+        .confidence-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #00d4ff 0%, #00ff88 100%);
+            transition: width 0.3s ease;
+        }
+        
+        #imagePreview {
+            max-width: 100%;
+            max-height: 300px;
+            border-radius: 8px;
+            margin-top: 1rem;
+        }
+        
+        .hidden {
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🔐 Watermark API Demo</h1>
+        
+        <!-- Health Status -->
+        <div class="card">
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+                <h2>Service Status</h2>
+                <span id="healthStatus" class="status-badge disconnected">Checking...</span>
+            </div>
+            <div id="healthDetails" class="result" style="margin-top: 1rem;"></div>
+        </div>
+        
+        <div class="grid">
+            <!-- Key Registration -->
+            <div class="card">
+                <h2>1. Register Key</h2>
+                <p style="color: #a0a0a0; margin-bottom: 1rem;">
+                    Create a new watermark key to use for generation and detection.
+                </p>
+                <button onclick="registerKey()">Register New Key</button>
+                
+                <div id="keyResult" class="hidden">
+                    <div class="key-display" style="margin-top: 1rem;">
+                        <span>Key ID:</span>
+                        <code id="currentKeyId">-</code>
+                        <button onclick="copyKey()" style="padding: 0.5rem;">📋</button>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Generation -->
+            <div class="card">
+                <h2>2. Generate Image</h2>
+                <div class="form-group">
+                    <label>Key ID</label>
+                    <input type="text" id="genKeyId" placeholder="wm_xxxxx">
+                </div>
+                <div class="form-group">
+                    <label>Prompt</label>
+                    <textarea id="genPrompt" rows="2" placeholder="A beautiful landscape">A beautiful landscape with mountains and a lake</textarea>
+                </div>
+                <div class="form-group">
+                    <label>Seed (optional)</label>
+                    <input type="number" id="genSeed" placeholder="Random">
+                </div>
+                <button onclick="generateImage()">Generate Image</button>
+                <div id="genResult" class="result hidden"></div>
+            </div>
+            
+            <!-- Detection -->
+            <div class="card">
+                <h2>3. Detect Watermark</h2>
+                <div class="form-group">
+                    <label>Key ID</label>
+                    <input type="text" id="detectKeyId" placeholder="wm_xxxxx">
+                </div>
+                <div class="form-group">
+                    <label>Upload Image</label>
+                    <input type="file" id="detectImage" accept="image/*" onchange="previewImage()">
+                </div>
+                <img id="imagePreview" class="hidden">
+                <button onclick="detectWatermark()">Detect Watermark</button>
+                <div id="detectResult" class="result hidden"></div>
+            </div>
+        </div>
+        
+        <!-- API Documentation Link -->
+        <div class="card" style="text-align: center;">
+            <p>
+                📚 Full API documentation available at 
+                <a href="/docs" style="color: #00d4ff;">/docs</a>
+            </p>
+        </div>
+    </div>
+    
+    <script>
+        const API_BASE = '';
+        let currentKeyId = null;
+        
+        // Check health on load
+        checkHealth();
+        setInterval(checkHealth, 30000);
+        
+        async function checkHealth() {
+            try {
+                const resp = await fetch(`${API_BASE}/health`);
+                const data = await resp.json();
+                
+                const badge = document.getElementById('healthStatus');
+                if (data.status === 'healthy') {
+                    badge.className = 'status-badge connected';
+                    badge.textContent = 'Healthy';
+                } else if (data.status === 'degraded') {
+                    badge.className = 'status-badge disconnected';
+                    badge.textContent = 'Degraded';
+                } else {
+                    badge.className = 'status-badge disconnected';
+                    badge.textContent = 'Unhealthy';
+                }
+                
+                document.getElementById('healthDetails').textContent = JSON.stringify(data, null, 2);
+            } catch (e) {
+                document.getElementById('healthStatus').className = 'status-badge disconnected';
+                document.getElementById('healthStatus').textContent = 'Error';
+                document.getElementById('healthDetails').textContent = `Error: ${e.message}`;
+            }
+        }
+        
+        async function registerKey() {
+            try {
+                const resp = await fetch(`${API_BASE}/keys/register`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({})
+                });
+                const data = await resp.json();
+                
+                if (resp.ok) {
+                    currentKeyId = data.key_id;
+                    document.getElementById('currentKeyId').textContent = currentKeyId;
+                    document.getElementById('keyResult').classList.remove('hidden');
+                    
+                    // Auto-fill key ID fields
+                    document.getElementById('genKeyId').value = currentKeyId;
+                    document.getElementById('detectKeyId').value = currentKeyId;
+                } else {
+                    alert(`Error: ${data.detail}`);
+                }
+            } catch (e) {
+                alert(`Error: ${e.message}`);
+            }
+        }
+        
+        function copyKey() {
+            navigator.clipboard.writeText(currentKeyId);
+        }
+        
+        async function generateImage() {
+            const keyId = document.getElementById('genKeyId').value;
+            const prompt = document.getElementById('genPrompt').value;
+            const seed = document.getElementById('genSeed').value;
+            
+            if (!keyId) {
+                alert('Please enter a Key ID');
+                return;
+            }
+            
+            const resultDiv = document.getElementById('genResult');
+            resultDiv.classList.remove('hidden', 'success', 'error');
+            resultDiv.textContent = 'Generating...';
+            
+            try {
+                const body = {
+                    key_id: keyId,
+                    prompt: prompt || 'A beautiful landscape'
+                };
+                if (seed) body.seed = parseInt(seed);
+                
+                const resp = await fetch(`${API_BASE}/generate`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(body)
+                });
+                const data = await resp.json();
+                
+                if (resp.ok) {
+                    resultDiv.classList.add('success');
+                    resultDiv.textContent = JSON.stringify(data, null, 2);
+                } else {
+                    resultDiv.classList.add('error');
+                    resultDiv.textContent = `Error: ${data.detail}`;
+                }
+            } catch (e) {
+                resultDiv.classList.add('error');
+                resultDiv.textContent = `Error: ${e.message}`;
+            }
+        }
+        
+        function previewImage() {
+            const file = document.getElementById('detectImage').files[0];
+            if (file) {
+                const reader = new FileReader();
+                reader.onload = (e) => {
+                    const preview = document.getElementById('imagePreview');
+                    preview.src = e.target.result;
+                    preview.classList.remove('hidden');
+                };
+                reader.readAsDataURL(file);
+            }
+        }
+        
+        async function detectWatermark() {
+            const keyId = document.getElementById('detectKeyId').value;
+            const fileInput = document.getElementById('detectImage');
+            
+            if (!keyId) {
+                alert('Please enter a Key ID');
+                return;
+            }
+            
+            if (!fileInput.files[0]) {
+                alert('Please select an image');
+                return;
+            }
+            
+            const resultDiv = document.getElementById('detectResult');
+            resultDiv.classList.remove('hidden', 'success', 'error');
+            resultDiv.textContent = 'Detecting...';
+            
+            try {
+                const formData = new FormData();
+                formData.append('key_id', keyId);
+                formData.append('image', fileInput.files[0]);
+                
+                const resp = await fetch(`${API_BASE}/detect`, {
+                    method: 'POST',
+                    body: formData
+                });
+                const data = await resp.json();
+                
+                if (resp.ok) {
+                    resultDiv.classList.add('success');
+                    const detected = data.detected ? '✅ WATERMARK DETECTED' : '❌ NO WATERMARK';
+                    resultDiv.innerHTML = `
+                        <div class="detection-result ${data.detected ? 'detected' : 'not-detected'}">
+                            <h3>${detected}</h3>
+                            <p>Confidence: ${(data.confidence * 100).toFixed(1)}%</p>
+                            <div class="confidence-bar">
+                                <div class="confidence-fill" style="width: ${data.confidence * 100}%"></div>
+                            </div>
+                        </div>
+                        <pre style="margin-top: 1rem; text-align: left;">${JSON.stringify(data, null, 2)}</pre>
+                    `;
+                } else {
+                    resultDiv.classList.add('error');
+                    resultDiv.textContent = `Error: ${data.detail}`;
+                }
+            } catch (e) {
+                resultDiv.classList.add('error');
+                resultDiv.textContent = `Error: ${e.message}`;
+            }
+        }
+    </script>
+</body>
+</html>
