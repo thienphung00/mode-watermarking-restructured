@@ -16,9 +16,40 @@ import logging
 from enum import Enum
 from typing import Any, Dict, Optional
 
+from service.api.artifacts import get_artifact_loader
 from service.api.key_store import get_key_store
 
 logger = logging.getLogger(__name__)
+
+# Module-level cache for likelihood params (loaded once at runtime)
+_ARTIFACT_LOADER = None
+_LIKELIHOOD_PARAMS = None
+
+
+def _load_likelihood_once():
+    """
+    Load likelihood parameters once and cache them.
+    
+    Returns:
+        Dictionary of likelihood parameters, or None if not available
+    """
+    global _ARTIFACT_LOADER, _LIKELIHOOD_PARAMS
+
+    if _LIKELIHOOD_PARAMS is not None:
+        return _LIKELIHOOD_PARAMS
+
+    loader = get_artifact_loader()
+    likelihood = loader.load_likelihood_params()
+
+    _ARTIFACT_LOADER = loader
+    _LIKELIHOOD_PARAMS = likelihood
+
+    if likelihood is not None:
+        print(f"[authority] Loaded likelihood params from {loader.likelihood_params_path}")
+    else:
+        print(f"[authority] No likelihood params available")
+
+    return likelihood
 
 
 class OperationType(str, Enum):
@@ -198,12 +229,18 @@ class Authority:
             request_id=request_id,
         )
         
+        # Build detection config with likelihood params
+        detection_config = self.DEFAULT_DETECTION_CONFIG.copy()
+        likelihood_params = _load_likelihood_once()
+        if likelihood_params is not None:
+            detection_config["likelihood_params"] = likelihood_params
+        
         return {
             "key_id": key_id,
             "derived_key": derived_key,
             "key_fingerprint": fingerprint,
             "g_field_config": self.DEFAULT_G_FIELD_CONFIG.copy(),
-            "detection_config": self.DEFAULT_DETECTION_CONFIG.copy(),
+            "detection_config": detection_config,
             "inversion_config": self.DEFAULT_INVERSION_CONFIG.copy(),
         }
     
