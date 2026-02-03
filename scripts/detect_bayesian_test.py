@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Bayesian Detection with Precomputed G-Values
+Bayesian Detection with Precomputed G-Values (Step 7)
 
 This script performs Bayesian watermark detection using precomputed g-values.
 It does NOT perform DDIM inversion or load images - it only consumes g-values
@@ -8,11 +8,17 @@ that were precomputed by precompute_inverted_g_values.py.
 
 This is the ONLY valid detection path for BayesianDetector when using precomputed g-values.
 
+Outputs:
+- metrics.json, detailed_results.json: full detection metrics and per-sample details.
+- {family_id}.json: family_id + per_image (label, log_odds, transform) for steps 8 and 9
+  (compute_score_normalization, calibrate_threshold).
+
 Usage:
     python scripts/detect_bayesian_test.py \
         --g-manifest path/to/g_manifest.jsonl \
         --likelihood-params outputs/likelihood_models/likelihood_params.json \
         --output-dir outputs/detection_results \
+        --family-id default \
         --batch-size 32
 """
 from __future__ import annotations
@@ -320,6 +326,7 @@ def batch_detect_watermark_bayesian(
                 "log_odds": result["log_odds"],
                 "score": score,
                 "correct": prediction == label,
+                "transform": entry.get("transform", "identity"),
             })
             
         except Exception as e:
@@ -367,7 +374,13 @@ def main():
         default=32,
         help="Batch size for processing (used only for tqdm batching/logging)",
     )
-    
+    parser.add_argument(
+        "--family-id",
+        type=str,
+        default="default",
+        help="Family identifier for result JSON consumed by compute_score_normalization and calibrate_threshold (step 8/9)",
+    )
+
     args = parser.parse_args()
     
     print("=" * 60)
@@ -399,6 +412,7 @@ def main():
     print(f"  G-manifest: {manifest_path}")
     print(f"  Likelihood params: {likelihood_params_path}")
     print(f"  Output directory: {output_dir}")
+    print(f"  Family ID: {args.family_id}")
     print(f"  Batch size: {args.batch_size}")
     
     # Run batch detection
@@ -437,10 +451,29 @@ def main():
     with open(detailed_results_path, "w") as f:
         json.dump({
             "metrics": metrics,
+            "family_id": args.family_id,
             "detailed_results": detailed_results,
         }, f, indent=2)
     print(f"✓ Detailed results saved to: {detailed_results_path}")
-    
+
+    # Write family result JSON for steps 8 and 9 (compute_score_normalization, calibrate_threshold)
+    per_image = [
+        {
+            "label": r["label"],
+            "log_odds": r["log_odds"],
+            "transform": r.get("transform", "identity"),
+        }
+        for r in detailed_results
+    ]
+    family_result_path = output_dir / f"{args.family_id}.json"
+    with open(family_result_path, "w") as f:
+        json.dump({
+            "family_id": args.family_id,
+            "per_image": per_image,
+            "num_samples": len(per_image),
+        }, f, indent=2)
+    print(f"✓ Family result saved to: {family_result_path} (for step 8/9)")
+
     print("\n" + "=" * 60)
     print("Detection complete!")
     print("=" * 60)
