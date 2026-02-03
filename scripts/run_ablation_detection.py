@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
 """
-Phase 3: Run detection ablation using trained likelihood models.
+Phase 7: Run detection ablation using trained likelihood models.
+
+Produces raw scores only; no thresholding. Emits per-image detection statistics
+exactly once, including transform metadata when present.
 
 This script:
 1. Loads families from Phase 0
 2. Loads likelihood models per family
 3. For each config in each family:
-   - Loads cached images + latents
-   - Computes g-values
-   - Runs BayesianDetector using family likelihood
-   - Computes log_odds and ROC metrics
-4. Saves per-config results
+   - Loads cached images (or optional image manifest with transforms)
+   - Computes g-values and runs BayesianDetector using family likelihood
+   - Outputs per_image list with log_odds, N_eff, p_hat, S, transform
+4. Saves per-config results (ROC for diagnostics only)
 
 No image generation, no g export, no likelihood training.
 """
@@ -408,45 +410,52 @@ def run_detection_for_config(
     num_inversion_steps: int = 25,
     allow_cache_rebuild: bool = False,
     dry_run: bool = False,
+    image_manifest_path: Optional[Path] = None,
+    images_base_dir: Optional[Path] = None,
 ) -> Optional[Dict[str, Any]]:
     """
-    Run detection for a single config.
-    
+    Run detection for a single config. Produces raw scores only; no thresholding.
+    Emits per-image statistics (including transform when present) exactly once.
+
     Args:
         config_path: Path to config YAML file
         family_id: Family identifier
         likelihood_model_path: Path to likelihood model JSON
         master_key: Master key
         device: Device to run on
-        cache_dir: Cache directory for datasets
+        cache_dir: Cache directory for datasets and latent cache
         num_inversion_steps: Number of inversion steps
-        
+        image_manifest_path: Optional JSONL manifest (image_path, label, key_id, transform)
+        images_base_dir: Base dir for image_path when using image_manifest_path
+
     Returns:
-        Result dictionary with detection statistics and ROC metrics, or None if skipped
+        Result dictionary with detection statistics and per_image list, or None if skipped
     """
     logger = setup_logging()
-    
+
     # Load config
     logger.info(f"Loading config: {config_path}")
     config = AppConfig.from_yaml(str(config_path))
     config_name = config_path.stem
-    
+
     # Create cache directory for this config
     config_cache_dir = cache_dir / config_name
     latent_cache_dir = config_cache_dir / "latents"
-    
-    # CRITICAL: Load and validate latent manifest from Phase 1
+
+    # Load latent manifest only when not using external image manifest (Phase 1 symmetry checks)
     latent_manifest_path = config_cache_dir / "latent_manifest.json"
-    if not latent_manifest_path.exists():
+    if image_manifest_path is None and not latent_manifest_path.exists():
         logger.warning(
             f"Latent manifest not found: {latent_manifest_path}. "
             f"Phase 1 must run first to create manifest. "
             f"Skipping {config_name}."
         )
         return None
-    
-    with open(latent_manifest_path, "r") as f:
-        latent_manifest = json.load(f)
+
+    latent_manifest: Dict[str, Any] = {}
+    if latent_manifest_path.exists():
+        with open(latent_manifest_path, "r") as f:
+            latent_manifest = json.load(f)
     
     # Get key_id and compute expected key fingerprint
     key_id = None
@@ -459,35 +468,33 @@ def run_detection_for_config(
             config.watermark.key_settings.prf_config
         )
     
-    # CRITICAL: Validate manifest key fingerprint matches runtime key
-    manifest_key_fingerprint = latent_manifest.get("master_key_fingerprint")
-    if manifest_key_fingerprint is not None and expected_key_fingerprint is not None:
-        if manifest_key_fingerprint != expected_key_fingerprint:
-            raise RuntimeError(
-                f"KEY MISMATCH: Latent manifest was created with different key.\n"
-                f"  Manifest key_fingerprint: {manifest_key_fingerprint[:16]}...\n"
-                f"  Expected key_fingerprint: {expected_key_fingerprint[:16]}...\n"
-                f"  Manifest path: {latent_manifest_path}\n"
-                f"  This prevents accidental reuse of incompatible caches.\n"
-                f"  Delete the cache or use the correct key."
+    # CRITICAL: Validate manifest key fingerprint when using Phase 1 cache
+    if latent_manifest:
+        manifest_key_fingerprint = latent_manifest.get("master_key_fingerprint")
+        if manifest_key_fingerprint is not None and expected_key_fingerprint is not None:
+            if manifest_key_fingerprint != expected_key_fingerprint:
+                raise RuntimeError(
+                    f"KEY MISMATCH: Latent manifest was created with different key.\n"
+                    f"  Manifest key_fingerprint: {manifest_key_fingerprint[:16]}...\n"
+                    f"  Expected key_fingerprint: {expected_key_fingerprint[:16]}...\n"
+                    f"  Manifest path: {latent_manifest_path}\n"
+                    f"  This prevents accidental reuse of incompatible caches.\n"
+                    f"  Delete the cache or use the correct key."
+                )
+        manifest_config_hash = latent_manifest.get("config_hash")
+        manifest_geometry_hash = latent_manifest.get("geometry_hash")
+        current_config_hash = compute_config_hash(config)
+        current_geometry_hash = compute_geometry_hash(config)
+        if manifest_config_hash != current_config_hash:
+            logger.warning(
+                f"Config hash mismatch: manifest={manifest_config_hash}, current={current_config_hash}. "
+                f"Proceeding with caution."
             )
-    
-    # Validate other manifest fields
-    manifest_config_hash = latent_manifest.get("config_hash")
-    manifest_geometry_hash = latent_manifest.get("geometry_hash")
-    current_config_hash = compute_config_hash(config)
-    current_geometry_hash = compute_geometry_hash(config)
-    
-    if manifest_config_hash != current_config_hash:
-        logger.warning(
-            f"Config hash mismatch: manifest={manifest_config_hash}, current={current_config_hash}. "
-            f"Proceeding with caution."
-        )
-    if manifest_geometry_hash != current_geometry_hash:
-        logger.warning(
-            f"Geometry hash mismatch: manifest={manifest_geometry_hash}, current={current_geometry_hash}. "
-            f"Proceeding with caution."
-        )
+        if manifest_geometry_hash != current_geometry_hash:
+            logger.warning(
+                f"Geometry hash mismatch: manifest={manifest_geometry_hash}, current={current_geometry_hash}. "
+                f"Proceeding with caution."
+            )
     
     # Log key and cache identity at startup
     log_key_and_cache_identity(
@@ -503,22 +510,31 @@ def run_detection_for_config(
     if dry_run:
         logger.info("[DRY RUN] Key and cache identity validated. Exiting.")
         return None
-    
-    # Check if dataset exists
-    manifest_path = config_cache_dir / "manifest.json"
-    if not manifest_path.exists():
-        # Phase 1 only processes the first config per family, so other configs won't have cache
-        logger.warning(
-            f"Dataset not found: {config_cache_dir}. "
-            f"Phase 1 only creates cache for the first config per family. "
-            f"Skipping {config_name}."
-        )
-        return None
-    
-    with open(manifest_path, "r") as f:
-        manifest_data = json.load(f)
-    watermarked_manifest = manifest_data["watermarked"]
-    clean_manifest = manifest_data["clean"]
+
+    # Load image manifest: either external (transforms) or Phase 1 cache manifest
+    if image_manifest_path is not None and images_base_dir is not None:
+        entries = []
+        with open(image_manifest_path, "r") as f:
+            for line in f:
+                if line.strip():
+                    entries.append(json.loads(line))
+        watermarked_manifest = [e for e in entries if e.get("label", 0) == 1]
+        clean_manifest = [e for e in entries if e.get("label", 0) == 0]
+        image_base_dir = images_base_dir.resolve()
+    else:
+        manifest_path = config_cache_dir / "manifest.json"
+        if not manifest_path.exists():
+            logger.warning(
+                f"Dataset not found: {config_cache_dir}. "
+                f"Phase 1 only creates cache for the first config per family. "
+                f"Skipping {config_name}."
+            )
+            return None
+        with open(manifest_path, "r") as f:
+            manifest_data = json.load(f)
+        watermarked_manifest = manifest_data["watermarked"]
+        clean_manifest = manifest_data["clean"]
+        image_base_dir = config_cache_dir
     
     # Initialize pipeline and inverter once per config
     logger.info("Initializing pipeline and inverter...")
@@ -538,17 +554,18 @@ def run_detection_for_config(
     )
     logger.info(f"Loaded likelihood detector from: {likelihood_model_path}")
     
-    # Process watermarked samples
+    # Process watermarked samples (raw scores only; no thresholding)
     logger.info(f"Processing {len(watermarked_manifest)} watermarked samples...")
     log_odds_wm = []
     S_wm = []
     N_eff_wm = []
     p_hat_wm = []
-    
+    per_image: List[Dict[str, Any]] = []
+
     for entry in tqdm(watermarked_manifest, desc="Watermarked"):
-        image_path = config_cache_dir / entry["image_path"]
+        image_path = image_base_dir / entry["image_path"]
         key_id = entry["key_id"]
-        
+
         stats = compute_detection_statistics(
             image_path=image_path,
             config=config,
@@ -563,22 +580,32 @@ def run_detection_for_config(
             model_id=config.diffusion.model_id,
             allow_cache_rebuild=allow_cache_rebuild,
         )
-        
+
         log_odds_wm.append(stats["log_odds"])
         S_wm.append(stats["S"])
         N_eff_wm.append(stats["N_eff"])
         p_hat_wm.append(stats["p_hat"])
-    
+        per_image.append({
+            "image_path": entry["image_path"],
+            "label": 1,
+            "key_id": key_id,
+            "log_odds": stats["log_odds"],
+            "N_eff": stats["N_eff"],
+            "p_hat": stats["p_hat"],
+            "S": stats["S"],
+            "transform": entry.get("transform", "identity"),
+        })
+
     # Process clean samples
     logger.info(f"Processing {len(clean_manifest)} clean samples...")
     log_odds_clean = []
     S_clean = []
     N_eff_clean = []
     p_hat_clean = []
-    
+
     for entry in tqdm(clean_manifest, desc="Clean"):
-        image_path = config_cache_dir / entry["image_path"]
-        
+        image_path = image_base_dir / entry["image_path"]
+
         stats = compute_detection_statistics(
             image_path=image_path,
             config=config,
@@ -592,20 +619,30 @@ def run_detection_for_config(
             latent_cache_dir=latent_cache_dir,
             model_id=config.diffusion.model_id,
         )
-        
+
         log_odds_clean.append(stats["log_odds"])
         S_clean.append(stats["S"])
         N_eff_clean.append(stats["N_eff"])
         p_hat_clean.append(stats["p_hat"])
-    
-    # Compute ROC metrics
+        per_image.append({
+            "image_path": entry["image_path"],
+            "label": 0,
+            "key_id": None,
+            "log_odds": stats["log_odds"],
+            "N_eff": stats["N_eff"],
+            "p_hat": stats["p_hat"],
+            "S": stats["S"],
+            "transform": entry.get("transform", "identity"),
+        })
+
+    # Compute ROC metrics (diagnostics only; no threshold applied here)
     scores = np.array(log_odds_wm + log_odds_clean)
     labels = np.array([1] * len(log_odds_wm) + [0] * len(log_odds_clean))
-    
+
     fpr, tpr, thresholds = compute_roc_curve(scores, labels)
     auc = compute_auc(fpr, tpr)
-    
-    # Build result dictionary
+
+    # Build result dictionary (raw scores only; per-image stats exactly once)
     result = {
         "config_name": config_name,
         "config_path": str(config_path),
@@ -615,7 +652,9 @@ def run_detection_for_config(
         "likelihood_model_path": str(likelihood_model_path),
         "timestamp": datetime.utcnow().isoformat() + "Z",
         "git_commit": get_git_commit(),
-        # Separate watermarked and clean statistics
+        # Per-image detection statistics (one row per image; includes transform)
+        "per_image": per_image,
+        # Aggregate lists (kept for backward compatibility)
         "log_odds_wm": log_odds_wm,
         "log_odds_clean": log_odds_clean,
         "S_wm": S_wm,
@@ -624,13 +663,13 @@ def run_detection_for_config(
         "N_eff_clean": N_eff_clean,
         "p_hat_wm": p_hat_wm,
         "p_hat_clean": p_hat_clean,
-        # ROC metrics
+        # ROC metrics (diagnostics only)
         "auc": auc,
         "roc_fpr": fpr.tolist(),
         "roc_tpr": tpr.tolist(),
         "roc_thresholds": thresholds.tolist(),
     }
-    
+
     return result
 
 
@@ -707,9 +746,24 @@ Examples:
         action="store_true",
         help="Dry-run mode: validate key and cache identity, then exit",
     )
-    
+    parser.add_argument(
+        "--image-manifest",
+        type=Path,
+        default=None,
+        help="Optional JSONL manifest with image_path, label, key_id, transform (e.g. from apply_image_transforms)",
+    )
+    parser.add_argument(
+        "--images-base-dir",
+        type=Path,
+        default=None,
+        help="Base directory for image_path when using --image-manifest",
+    )
+
     args = parser.parse_args()
-    
+
+    if (args.image_manifest is None) != (args.images_base_dir is None):
+        raise ValueError("--image-manifest and --images-base-dir must be set together or both omitted.")
+
     # Setup
     logger = setup_logging()
     args.results_dir.mkdir(parents=True, exist_ok=True)
@@ -774,6 +828,8 @@ Examples:
                     num_inversion_steps=args.num_inversion_steps,
                     allow_cache_rebuild=args.allow_cache_rebuild,
                     dry_run=args.dry_run,
+                    image_manifest_path=args.image_manifest,
+                    images_base_dir=args.images_base_dir,
                 )
                 
                 # Skip if result is None (config was skipped)

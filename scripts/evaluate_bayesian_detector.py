@@ -1,18 +1,7 @@
 #!/usr/bin/env python3
 """
-Bayesian Detector Controlled Evaluation & Signal-Strength Tuning
-
-This script provides controlled evaluation and signal-strength tuning for the
-Bayesian watermark detector without changing detector math or likelihood logic.
-
-Features:
-- ROC curve & AUC computation at fixed inversion steps (25)
-- Adjustable detection threshold (evaluation-side only)
-- Comprehensive logging (N_eff, config hash, threshold, AUC)
-- Signal-strength tuning via config (mask density, frequency band, normalization)
-
-This script is generation-side + evaluation-side only. Detector correctness
-and likelihood logic remain unchanged.
+Controlled evaluation and signal-strength tuning for the Bayesian watermark detector;
+uses log_odds as the sole score variable for thresholds, normalization, and metrics.
 
 Usage:
     python scripts/evaluate_bayesian_detector.py \
@@ -422,24 +411,36 @@ def evaluate_bayesian_detector(
     output_dir: Optional[Path] = None,
     inversion_steps: int = 25,
     latent_type: str = "zT",
+    normalization_path: Optional[Path] = None,
+    calibration_path: Optional[Path] = None,
+    family_id: Optional[str] = None,
 ) -> Tuple[Dict[str, float], Dict[str, Any]]:
     """
-    Run controlled evaluation on Bayesian detector.
-    
+    Run controlled evaluation on Bayesian detector. Optionally uses normalized
+    scores and calibrated (worst-case-safe) threshold. Reports worst-case TPR at
+    fixed FPR and TPR variance across transforms when transform metadata present.
+
     Args:
         manifest_path: Path to g-manifest.jsonl file
         likelihood_params_path: Path to trained likelihood parameters
         log_odds_threshold: Detection threshold in log-odds space (default: 0.0)
-        plot_roc: Whether to generate and save ROC curve plot
+        fixed_fpr: If set, override threshold by ROC point closest to this FPR
+        plot_roc: Whether to generate and save ROC curve plot (diagnostics only)
         output_dir: Directory to save results (default: same as manifest parent)
         inversion_steps: Number of inversion steps (for logging/plotting)
         latent_type: Latent type (for logging/plotting)
-        
+        normalization_path: Optional JSON of normalization params per family
+        calibration_path: Optional JSON of deployment threshold per family
+        family_id: Family ID for normalization/calibration lookup when using both
+
     Returns:
         Tuple of (metrics_dict, evaluation_info_dict)
     """
     # Load manifest
     entries = load_manifest(manifest_path)
+
+    # Score consistency: evaluation uses log_odds only; normalization and calibration
+    # are applied to log_odds. S is not used for thresholds or metrics.
     
     if len(entries) == 0:
         raise ValueError(f"Manifest is empty: {manifest_path}")
@@ -568,25 +569,44 @@ def evaluate_bayesian_detector(
                 "label": label,
                 "log_odds": log_odds,
                 "n_eff": n_eff,
+                "transform": entry.get("transform", "identity"),
             })
             
         except Exception as e:
             raise RuntimeError(f"Failed to process entry {i}: {e}") from e
     
-    # Compute ROC curve and AUC
+    # Compute ROC curve and AUC (diagnostics only)
     scores_array = np.array(log_odds_scores)
     labels_array = np.array(labels)
-    
+
+    # Optional: normalize scores using family-level normalization
+    if normalization_path is not None and family_id is not None and normalization_path.exists():
+        with open(normalization_path, "r") as f:
+            norm_by_family = json.load(f)
+        norm = norm_by_family.get(family_id, {})
+        mean = norm.get("mean", 0.0)
+        std = norm.get("std", 1.0)
+        if std <= 0:
+            std = 1.0
+        scores_array = (scores_array - mean) / std
+
     fpr, tpr, thresholds = compute_roc_curve(scores_array, labels_array)
     auc = compute_auc(fpr, tpr)
 
-    # Choose evaluation threshold
+    # Choose evaluation threshold: calibrated (worst-case-safe) or fixed-fpr or fixed value
     threshold_source = "fixed_log_odds_threshold"
     achieved_fpr_from_roc = None
     achieved_fpr_roc_index = None
     target_fpr = None
 
-    if fixed_fpr is not None:
+    if calibration_path is not None and family_id is not None and calibration_path.exists():
+        with open(calibration_path, "r") as f:
+            cal_by_family = json.load(f)
+        cal = cal_by_family.get(family_id, {})
+        log_odds_threshold = float(cal.get("deployment_threshold", log_odds_threshold))
+        threshold_source = "calibrated_worst_case_safe"
+        target_fpr = cal.get("target_fpr")
+    elif fixed_fpr is not None:
         target_fpr = float(fixed_fpr)
         selected_threshold, achieved_fpr_from_roc, achieved_fpr_roc_index = find_threshold_at_fpr(
             fpr=fpr,
@@ -596,12 +616,32 @@ def evaluate_bayesian_detector(
         log_odds_threshold = float(selected_threshold)
         threshold_source = "roc_closest_fpr"
 
-    # Apply threshold (evaluation-side only) and compute metrics at this operating point
+    # Apply threshold and compute metrics at this operating point (log_odds only; S not used)
     predictions_array = (scores_array > float(log_odds_threshold)).astype(int)
     metrics = compute_metrics(predictions_array.tolist(), labels, log_odds_scores)
     metrics["auc"] = auc
     metrics["log_odds_threshold"] = float(log_odds_threshold)
     metrics["threshold_source"] = threshold_source
+
+    # Per-transform and worst-case TPR (after metrics so we can use metrics in fallback)
+    transforms = [row["transform"] for row in detailed_results]
+    unique_transforms = list(dict.fromkeys(transforms))
+    per_transform_tpr = {}
+    for t in unique_transforms:
+        mask = np.array([row["transform"] == t for row in detailed_results])
+        lab_t = labels_array[mask]
+        pred_t = predictions_array[mask]
+        n_pos_t = np.sum(lab_t == 1)
+        if n_pos_t > 0:
+            per_transform_tpr[t] = float(np.sum((lab_t == 1) & (pred_t == 1)) / n_pos_t)
+        else:
+            per_transform_tpr[t] = 0.0
+    tpr_values = list(per_transform_tpr.values())
+    worst_case_tpr = float(np.min(tpr_values)) if tpr_values else float(metrics.get("recall", 0.0))
+    tpr_variance = float(np.var(tpr_values)) if len(tpr_values) > 1 else 0.0
+    metrics["worst_case_tpr"] = worst_case_tpr
+    metrics["tpr_variance"] = tpr_variance
+    metrics["per_transform_tpr"] = per_transform_tpr
 
     if target_fpr is not None:
         neg_mask = labels_array == 0
@@ -628,10 +668,27 @@ def evaluate_bayesian_detector(
         pred = int(predictions_array[j])
         row["prediction"] = pred
         row["correct"] = bool(pred == int(row["label"]))
-    
+
+    # Per-transform TPR, worst-case TPR at fixed FPR, and TPR variance (when transform present)
+    transforms = [row["transform"] for row in detailed_results]
+    unique_transforms = list(dict.fromkeys(transforms))
+    per_transform_tpr: Dict[str, float] = {}
+    for t in unique_transforms:
+        mask = np.array([row["transform"] == t for row in detailed_results])
+        lab_t = labels_array[mask]
+        pred_t = predictions_array[mask]
+        n_pos_t = np.sum(lab_t == 1)
+        if n_pos_t > 0:
+            per_transform_tpr[t] = float(np.sum((lab_t == 1) & (pred_t == 1)) / n_pos_t)
+        else:
+            per_transform_tpr[t] = 0.0
+    tpr_values = list(per_transform_tpr.values())
+    worst_case_tpr = float(np.min(tpr_values)) if tpr_values else float(metrics.get("recall", 0.0))
+    tpr_variance = float(np.var(tpr_values)) if len(tpr_values) > 1 else 0.0
+
     # Compute average N_eff
     avg_n_eff = float(np.mean(n_eff_values)) if n_eff_values else 0.0
-    
+
     # Extract g_field_config_hash from manifest entries or metadata.json (if available)
     g_field_config_hash = None
     g_field_config = None
@@ -677,6 +734,9 @@ def evaluate_bayesian_detector(
         "roc_fpr": fpr.tolist(),
         "roc_tpr": tpr.tolist(),
         "roc_thresholds": thresholds.tolist(),
+        "worst_case_tpr": metrics.get("worst_case_tpr"),
+        "tpr_variance": metrics.get("tpr_variance"),
+        "per_transform_tpr": metrics.get("per_transform_tpr"),
     }
     
     # Save ROC plot if requested
@@ -763,7 +823,25 @@ def main():
         default="zT",
         help="Latent type (for logging/plotting, default: zT)",
     )
-    
+    parser.add_argument(
+        "--normalization",
+        type=str,
+        default=None,
+        help="Optional path to normalization JSON per family (from compute_score_normalization)",
+    )
+    parser.add_argument(
+        "--calibration",
+        type=str,
+        default=None,
+        help="Optional path to calibration JSON per family (from calibrate_threshold)",
+    )
+    parser.add_argument(
+        "--family-id",
+        type=str,
+        default=None,
+        help="Family ID for normalization/calibration lookup when using --normalization/--calibration",
+    )
+
     args = parser.parse_args()
     
     print("=" * 60)
@@ -810,6 +888,9 @@ def main():
         output_dir=output_dir,
         inversion_steps=args.inversion_steps,
         latent_type=args.latent_type,
+        normalization_path=Path(args.normalization) if args.normalization else None,
+        calibration_path=Path(args.calibration) if args.calibration else None,
+        family_id=args.family_id,
     )
     
     # Print results
@@ -834,8 +915,15 @@ def main():
     print(f"  True Negatives:  {metrics['tn']}")
     print(f"  False Positives: {metrics['fp']}")
     print(f"  False Negatives: {metrics['fn']}")
-    print(f"\nROC/AUC Metrics:")
+    print(f"\nROC/AUC Metrics (diagnostics):")
     print(f"  AUC: {metrics['auc']:.4f}")
+    if "worst_case_tpr" in metrics:
+        print(f"\nTransform-robust metrics (at fixed FPR):")
+        print(f"  Worst-case TPR: {metrics['worst_case_tpr']:.4f}")
+        print(f"  TPR variance across transforms: {metrics.get('tpr_variance', 0):.4f}")
+        if metrics.get("per_transform_tpr"):
+            for t, tpr in metrics["per_transform_tpr"].items():
+                print(f"    {t}: TPR={tpr:.4f}")
     print(f"\nScore Statistics (log_odds):")
     print(f"  Watermarked mean:   {metrics['score_mean_watermarked']:.4f} ± {metrics['score_std_watermarked']:.4f}")
     print(f"  Unwatermarked mean: {metrics['score_mean_unwatermarked']:.4f} ± {metrics['score_std_unwatermarked']:.4f}")

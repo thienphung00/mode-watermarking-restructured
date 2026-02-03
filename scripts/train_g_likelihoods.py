@@ -1,22 +1,19 @@
 #!/usr/bin/env python3
 """
-Train Bayesian likelihood models for g-values.
+Train Bayesian likelihood models for g-values (one per detector family).
 
-This script trains two likelihood models:
-- P(g | watermarked)
-- P(g | unwatermarked)
-
-Models are simple Bernoulli/logistic models with per-position biases.
-Learned parameters are saved to disk for use by the Bayesian detector.
+This script trains pooled likelihood models per family (P(g|watermarked), P(g|unwatermarked))
+and logs per-transform sample counts for visibility only—transforms remain views, no rebalancing.
 
 Inputs:
-- Precomputed inverted g-values (created by precompute_inverted_g_values.py)
+- Precomputed inverted g-values (created by precompute_inverted_g_values.py),
+  optionally with "transform" in manifest entries (all transforms are pooled).
 - Corresponding labels: watermarked / unwatermarked
 - Optional masks (from precomputation)
 
 This script only loads precomputed g-values - no DDIM inversion, no image loading.
 For Tier-2 training, use precompute_inverted_g_values.py first to precompute g-values
-from images using DDIM inversion.
+from images (including transformed views) using DDIM inversion.
 
 Usage:
     # Step 1: Precompute inverted g-values
@@ -27,15 +24,17 @@ Usage:
         --master-key "your_secret_key" \
         --num-inversion-steps 20
     
-    # Step 2: Train likelihood models
+    # Step 2: Train likelihood models (train split only)
     python scripts/train_g_likelihoods.py \
-        --g-manifest path/to/precomputed_g_values/g_manifest.jsonl \
-        --output-dir outputs/likelihood_models
+        --g-manifest path/to/precomputed_g_values/g_manifest_train.jsonl \
+        --output-dir outputs/likelihood_models_train \
+        --phase train
 """
 from __future__ import annotations
 
 import argparse
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
 
@@ -653,10 +652,17 @@ def main():
     )
     
     parser.add_argument(
+        "--phase",
+        type=str,
+        default="train",
+        choices=["train"],
+        help="Dataset phase: only 'train' is valid for likelihood training. Use g_manifest_train.jsonl.",
+    )
+    parser.add_argument(
         "--output-dir",
         type=str,
-        default="outputs/likelihood_models",
-        help="Directory to save trained models",
+        default="outputs/likelihood_models_train",
+        help="Directory to save trained models (default: outputs/likelihood_models_train for phase=train)",
     )
     
     parser.add_argument(
@@ -722,7 +728,10 @@ def main():
         raise ValueError("Cannot provide both --g-manifest and --g-wm/--g-clean. Choose one mode.")
     
     training_metadata = None
-    
+    by_t: Dict[str, Dict[str, int]] = {}
+    train_manifest_hash: Optional[str] = None
+    training_timestamp: Optional[str] = None
+
     # Create datasets
     if use_numpy:
         # Load from numpy arrays (Phase 1 export)
@@ -798,7 +807,11 @@ def main():
     else:
         # Load from manifest (original mode)
         train_manifest_path = Path(args.g_manifest)
-        
+        # Pipeline hygiene: compute train manifest hash for leakage guards in steps 7–10
+        from scripts.utils import compute_manifest_content_hash
+        train_manifest_hash = compute_manifest_content_hash(train_manifest_path)
+        training_timestamp = datetime.now(timezone.utc).isoformat()
+
         if args.metadata_path:
             metadata_path = Path(args.metadata_path)
         else:
@@ -817,7 +830,29 @@ def main():
         
         train_dataset = GValueDataset(train_manifest_path)
         print(f"Training samples: {len(train_dataset)}")
-        
+
+        # Per-transform sample counts (visibility only; no rebalancing)
+        by_t: Dict[str, Dict[str, int]] = {}
+        for s in train_dataset.samples:
+            t = s.get("transform", "identity")
+            if t not in by_t:
+                by_t[t] = {"total": 0, "clean": 0, "watermarked": 0}
+            by_t[t]["total"] += 1
+            lab = train_dataset._extract_label(s)
+            if lab == 0:
+                by_t[t]["clean"] += 1
+            else:
+                by_t[t]["watermarked"] += 1
+        print("Per-transform sample counts (visibility only):")
+        for t in sorted(by_t.keys()):
+            c = by_t[t]
+            print(f"  {t}: total={c['total']} clean={c['clean']} watermarked={c['watermarked']}")
+        for t, c in by_t.items():
+            if c["clean"] == 0:
+                print(f"  Warning: transform '{t}' has no clean samples.")
+            if c["watermarked"] == 0:
+                print(f"  Warning: transform '{t}' has no watermarked samples.")
+
         first_sample = train_dataset[0]
         g_shape = first_sample["g"].shape[-1]
         num_positions = g_shape
@@ -914,7 +949,16 @@ def main():
         "watermarked": params_w,
         "unwatermarked": params_u,
     }
-    
+    # Pipeline hygiene: lock likelihood – treat as immutable after training
+    # Store train manifest hash and timestamp so steps 7–10 can assert calib/test use disjoint data
+    if train_manifest_hash is not None:
+        output_data["train_manifest_hash"] = train_manifest_hash
+    if training_timestamp is not None:
+        output_data["training_timestamp"] = training_timestamp
+    # Do not retrain on calib/test data; use only g_manifest_train.jsonl for this step
+    if use_manifest and by_t:
+        output_data["per_transform_counts"] = by_t
+
     # CRITICAL: Extract and store key fingerprint from training data
     # Try to get key info from metadata or args
     key_fingerprint = None

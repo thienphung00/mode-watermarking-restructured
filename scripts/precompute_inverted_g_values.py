@@ -726,16 +726,20 @@ def precompute_inverted_g_values(
             if mask_path is not None:
                 torch.save(mask, mask_path)
             
-            # Create manifest entry (strict contract: only g_path, label, key_id, mask_path)
+            # Create manifest entry (strict contract: g_path, label, key_id, mask_path; optional transform)
             g_manifest_entry = {
                 "g_path": str(g_path.relative_to(output_dir)),
                 "label": label,
                 "key_id": key_id,  # None for unwatermarked, string for watermarked
             }
-            
+
             if mask_path is not None:
                 g_manifest_entry["mask_path"] = str(mask_path.relative_to(output_dir))
-            
+
+            # Preserve transform label when present (transform-aware pipeline)
+            if "transform" in entry:
+                g_manifest_entry["transform"] = entry["transform"]
+
             g_manifest_entries.append(g_manifest_entry)
             
         except Exception as e:

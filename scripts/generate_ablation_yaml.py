@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """
-Generate the 12 watermark ablation YAML configs (simple, deterministic, hard-coded).
+Generate the 3 watermark ablation YAML configs (simple, deterministic, hard-coded).
+
+Output configs: baseline_bandpass_mid_binary, baseline_bandpass_low_continuous,
+baseline_bandpass_mid_continuous.
 """
 
 from __future__ import annotations
@@ -221,31 +224,36 @@ def main() -> None:
     output_dir = REPO_ROOT / "experiments" / "watermark_ablation" / "configs"
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    # Exactly 3 configs: baseline_bandpass_mid_binary, baseline_bandpass_low_continuous,
+    # baseline_bandpass_mid_continuous (no config explosion).
+    CONFIG_SPECS = [
+        ("baseline", "binary", "bandpass_mid"),      # -> baseline_bandpass_mid_binary.yaml
+        ("baseline", "continuous", "bandpass_low"),  # -> baseline_bandpass_low_continuous.yaml
+        ("baseline", "continuous", "bandpass_mid"), # -> baseline_bandpass_mid_continuous.yaml
+    ]
     expected_filenames: list[str] = []
     written_paths: list[Path] = []
 
-    for strength in ["baseline", "strong"]:
-        for mapping_mode in MAPPING_MODES:
-            for frequency_band in ["bandpass_low", "bandpass_mid", "bandpass_wide"]:
-                filename = f"{strength}_{mapping_mode}_{frequency_band}.yaml"
-                expected_filenames.append(filename)
+    for strength, mapping_mode, frequency_band in CONFIG_SPECS:
+        filename = f"{strength}_{frequency_band}_{mapping_mode}.yaml"
+        expected_filenames.append(filename)
 
-                config = build_config(
-                    strength=strength,
-                    mapping_mode=mapping_mode,
-                    frequency_band=frequency_band,
-                    key_master=args.key_master,
-                )
+        config = build_config(
+            strength=strength,
+            mapping_mode=mapping_mode,
+            frequency_band=frequency_band,
+            key_master=args.key_master,
+        )
 
-                out_path = output_dir / filename
-                write_config_yaml(config, out_path)
-                logger.info(str(out_path))
-                written_paths.append(out_path)
+        out_path = output_dir / filename
+        write_config_yaml(config, out_path)
+        logger.info(str(out_path))
+        written_paths.append(out_path)
 
-    # Validation: exactly 12 files written with expected names
+    # Validation: exactly 3 files written with expected names
     expected_set = set(expected_filenames)
     written_set = {p.name for p in written_paths}
-    assert len(written_paths) == 12, f"Expected to write 12 files, wrote {len(written_paths)}"
+    assert len(written_paths) == 3, f"Expected to write 3 files, wrote {len(written_paths)}"
     assert written_set == expected_set, f"Filename mismatch. Expected {sorted(expected_set)}, got {sorted(written_set)}"
 
     # Optionally log filenames sorted lexicographically
