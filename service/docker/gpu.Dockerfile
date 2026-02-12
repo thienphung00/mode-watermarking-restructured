@@ -58,9 +58,8 @@ RUN pip3 install --no-cache-dir \
 COPY src/ /app/src/
 COPY service/gpu/ /app/service/gpu/
 
-# Copy detection artifacts so /app/data/artifacts exists (volume can override at runtime)
+# Create artifacts dir; at runtime use volume mount (e.g. ../results:/app/data/artifacts)
 RUN mkdir -p /app/data/artifacts
-COPY results/normalization_098.json results/likelihood_params.json results/calibration_098_001.json /app/data/artifacts/
 
 # Set Python path
 ENV PYTHONPATH=/app
