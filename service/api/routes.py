@@ -16,7 +16,7 @@ import time
 import uuid
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, File, UploadFile, Form, Request
+from fastapi import APIRouter, HTTPException, File, UploadFile, Form
 from fastapi.responses import HTMLResponse, FileResponse
 
 from service.api.schemas import (
@@ -109,7 +109,7 @@ async def list_keys() -> KeyListResponse:
         503: {"model": ErrorResponse, "description": "GPU worker unavailable"},
     },
 )
-async def generate_image(request: Request, body: GenerateRequest) -> GenerateResponse:
+async def generate_image(body: GenerateRequest) -> GenerateResponse:
     """
     Generate a watermarked image using the specified key.
     
@@ -162,9 +162,9 @@ async def generate_image(request: Request, body: GenerateRequest) -> GenerateRes
         
         processing_time_ms = (time.time() - start_time) * 1000
         
-        # Absolute URL so the image displays correctly (same- or cross-origin)
-        base = str(request.base_url).rstrip("/")
-        image_url = f"{base}/images/{filename}"
+        # Relative path for image (filename is always basename; served at /images/)
+        filename_for_url = filename if not filename.startswith("gs://") else filename.split("/")[-1]
+        image_url = f"/images/{filename_for_url}"
         
         # Persist generation record (non-blocking, failure-tolerant)
         try:
